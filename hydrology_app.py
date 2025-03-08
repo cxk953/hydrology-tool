@@ -8,16 +8,296 @@ from matplotlib.widgets import Button, TextBox
 from geomdl import fitting
 import pandas as pd
 from tkinter import filedialog
+
+import mpl_toolkits
 import pyperclip
 import scipy as sp
 from matplotlib.ticker import MultipleLocator, AutoMinorLocator
-import mpl_toolkits
 import openpyxl
 import xlsxwriter
 plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 
+class CurveSeries:
+    """单个曲线系列管理类"""
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+
+    def __init__(self, years, tests, q, h, label):
+        self.years = years
+        self.tests = tests
+        self.discharge = np.array(q, dtype=float)
+        self.water_level = np.array(h, dtype=float)
+        self.label = label
+        self.color = self.colors[len(SeriesManager.series) % 5]
+        self.visible = True
+        self.init_curve()
+
+    def init_curve(self, degree=3, ctrlpts_size=8):
+        """初始化B样条曲线"""
+        data_points = list(zip(self.discharge, self.water_level))
+        self.curve = fitting.approximate_curve(
+            data_points,
+            degree=degree,
+            ctrlpts_size=ctrlpts_size
+        )
+        self.curve.sample_size = 1000
+
+
+class SeriesManager:
+    """多系列管理主程序"""
+    series = []
+    current_index = 0
+
+    @classmethod
+    def add_series(cls, years, tests, q, h, label):
+        """添加新系列"""
+        if len(cls.series) >= 5:
+            cls.show_error("提示", "最多支持5个系列")
+            return
+        new_series = CurveSeries(years, tests, q, h, label)
+        cls.series.append(new_series)
+
+    @classmethod
+    def get_current(cls):
+        """获取当前编辑的系列"""
+        return cls.series[cls.current_index] if cls.series else None
+
+
+def load_data_with_label():
+    """带标注的数据加载"""
+    root = Tk()
+    root.withdraw()
+
+    file_path = filedialog.askopenfilename(
+        filetypes=[("Excel文件", "*.xlsx"), ("CSV文件", "*.csv")]
+    )
+    if not file_path: return None
+
+    try:
+        df = pd.read_excel(file_path) if file_path.endswith('.xlsx') else pd.read_csv(file_path)
+        df_clean = df.dropna(subset=['水位', '流量'])
+
+        label = simpledialog.askstring("系列标注", "请输入系列名称（如：2023年汛前）")
+        return {
+            'years': df_clean['年份'].values,
+            'tests': df_clean['测次'].values,
+            'q': df_clean['流量'].values,
+            'h': df_clean['水位'].values,
+            'label': label
+        }
+    except Exception as e:
+        print(f"数据加载失败: {str(e)}")
+        return None
+
+
+class MainApp:
+    """主界面程序"""
+
+    def __init__(self):
+        self.fig, self.ax = plt.subplots(figsize=(12, 8))
+        self.setup_ui()
+
+    def setup_ui(self):
+        """初始化界面控件"""
+        # 控制按钮区域
+        self.ax_add = plt.axes([0.82, 0.75, 0.15, 0.05])
+        self.btn_add = Button(self.ax_add, '添加系列', color='lightgreen')
+        self.btn_add.on_clicked(self.add_series)
+
+        self.ax_export = plt.axes([0.82, 0.65, 0.15, 0.05])
+        self.btn_export = Button(self.ax_export, '导出报告', color='lightblue')
+        self.btn_export.on_clicked(self.export_report)
+
+        # 绘制初始空白图表
+        self.update_plot()
+
+    def add_series(self, event):
+        """添加新系列"""
+        data = load_data_with_label()
+        if data:
+            SeriesManager.add_series(
+                data['years'], data['tests'],
+                data['q'], data['h'], data['label']
+            )
+            self.update_plot()
+
+    def update_plot(self):
+        """更新图表显示"""
+        self.ax.clear()
+
+        for idx, series in enumerate(SeriesManager.series):
+            if series.visible:
+                # 绘制实测点
+                self.ax.scatter(
+                    series.discharge, series.water_level,
+                    color=series.color, label=f"{series.label}实测",
+                    alpha=0.6
+                )
+
+                # 绘制拟合曲线
+                evalpts = np.array(series.curve.evalpts)
+                linewidth = 3 if idx == SeriesManager.current_index else 1.5
+                self.ax.plot(
+                    evalpts[:, 0], evalpts[:, 1],
+                    color=series.color, linewidth=linewidth,
+                    label=f"{series.label}拟合"
+                )
+
+        self.ax.set_xlabel("流量 (m³/s)", fontsize=12)
+        self.ax.set_ylabel("水位 (m)", fontsize=12)
+        self.ax.legend(loc='upper left')
+        plt.draw()
+
+    def export_report(self, event):
+        """导出对比报告（示例功能）"""
+        print("导出功能已触发（此处可添加具体导出逻辑）")
+
+
+class MultiCurveEditor:
+    def __init__(self):
+        self.fig, self.ax = plt.subplots(figsize=(12, 8))
+        self.series = []  # 存储所有曲线系列
+        self.current_index = 0  # 当前编辑的系列索引
+        self.colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']  # 预设颜色
+
+        # 初始化界面
+        self.setup_ui()
+
+    def setup_ui(self):
+        """初始化用户界面"""
+        # 系列选择下拉框
+        self.ax_series = self.fig.add_axes([0.82, 0.75, 0.15, 0.15])
+        self.series_selector = Button(self.ax_series, "切换系列")
+        self.series_selector.on_clicked(self.show_series_selection)
+
+        # 其他控件保持不变，但操作将作用于当前选中的系列
+        # [原有按钮配置代码...]
+
+    def add_series(self, years, tests, discharges, water_levels, label):
+        """添加新的曲线系列"""
+        if len(self.series) >= 5:
+            self.show_error("提示", "最多支持5个系列")
+            return
+
+        color = self.colors[len(self.series)]
+        series = {
+            'editor': CurveEditor(years, tests, discharges, water_levels, color),
+            'visible': True,
+            'label': label
+        }
+        self.series.append(series)
+        self.update_display()
+
+    def update_display(self):
+        """更新所有系列显示"""
+        self.ax.clear()
+
+        for idx, series in enumerate(self.series):
+            if series['visible']:
+                # 绘制实测点
+                self.ax.plot(series['editor'].discharges,
+                             series['editor'].water_levels,
+                             'o', color=series['color'],
+                             label=f"{series['label']}实测")
+
+                # 绘制控制多边形
+                ctrlpts = np.array(series['editor'].curve.ctrlpts)
+                self.ax.plot(ctrlpts[:, 0], ctrlpts[:, 1],
+                             '--', color=series['color'],
+                             linewidth=1, alpha=0.5)
+
+                # 绘制拟合曲线
+                evalpts = np.array(series['editor'].curve.evalpts)
+                linewidth = 2 if idx == self.current_index else 1.5
+                self.ax.plot(evalpts[:, 0], evalpts[:, 1],
+                             '-', color=series['color'],
+                             linewidth=linewidth,
+                             label=f"{series['label']}拟合")
+
+        # 设置当前可编辑系列的特殊标记
+        current_editor = self.series[self.current_index]['editor']
+        self.ax.plot([], [], 's', color=current_editor.color,
+                     markersize=10, markerfacecolor='yellow',
+                     label='当前控制点')
+
+        self.ax.legend(loc='upper left')
+        self.fig.canvas.draw()
+
+    def show_series_selection(self, event):
+        """显示系列选择弹窗"""
+        self.selector_fig = plt.figure("选择操作系列", figsize=(5, 3))
+
+        # 创建系列切换按钮
+        for idx, series in enumerate(self.series):
+            ax = self.selector_fig.add_subplot(len(self.series), 1, idx + 1)
+            btn = Button(ax, series['label'])
+            btn.on_clicked(lambda e, i=idx: self.switch_series(i))
+
+    def switch_series(self, index):
+        """切换当前操作系列"""
+        self.current_index = index
+        plt.close(self.selector_fig)
+        self.update_display()
+
+    def toggle_visibility(self, index):
+        """切换系列可见性"""
+        self.series[index]['visible'] = not self.series[index]['visible']
+        self.update_display()
+
+
+class EnhancedCurveEditor(CurveEditor):
+    def __init__(self, years, tests, discharges, water_levels, color):
+        # 修改父类初始化，增加颜色参数
+        self.color = color
+        super().__init__(years, tests, discharges, water_levels)
+
+        # 修改图形元素颜色
+        self.data_plot.set_color(color)
+        self.ctrl_plot.set_color(color)
+        self.curve_plot.set_color(color)
+
+    # 在文件选择对话框中添加系列标注功能
+    def load_hydrological_data_with_label():
+        file_path = filedialog.askopenfilename()
+        # [原有数据读取代码...]
+
+        # 弹出系列标注对话框
+        label = simpledialog.askstring("系列标注", "请输入本系列标注（如：2023年汛前）")
+
+        return years, tests, discharges, water_levels, label
+    def export_comparison_report(self):
+        """生成多系列对比报告"""
+        wb = xlsxwriter.Workbook('对比分析报告.xlsx')
+
+        # 水位-流量对比表
+        ws = wb.add_worksheet('水位流量关系')
+        self._write_comparison_data(ws)
+
+        # 精度对比表
+        ws = wb.add_worksheet('精度对比')
+        self._write_accuracy_comparison(ws)
+
+        # 控制点对比图
+        chart = wb.add_chart({'type': 'scatter'})
+        # [图表配置代码...]
+
+        wb.close()
+
+    def _write_accuracy_comparison(self, worksheet):
+        """写入精度对比数据"""
+        headers = ['系列名称', '符号检验u值', '标准差S(%)', 't检验值']
+        worksheet.write_row(0, 0, headers)
+
+        for row, series in enumerate(self.series, 1):
+            test_data = series['editor'].calculate_three_tests()
+            # [精度指标计算代码...]
+            worksheet.write_row(row, 0, [
+                series['label'],
+                u_value,
+                s_value,
+                t_value
+            ])
 def load_hydrological_data():
     """按水位排序加载数据（返回年份和测次）"""
     try:
@@ -833,16 +1113,5 @@ def load_and_show_main_app():
 # ... 主程序 ...
 
 if __name__ == '__main__':
-    start_interface()  # 显示开始界面
-    # 加载数据
-    years, tests, discharges, water_levels, file_path = load_hydrological_data()
-    if discharges is None:
-        print("程序终止：未选择有效数据文件")
-        exit()
-
-    # 初始化编辑器
-    try:
-        editor = CurveEditor(years, tests, discharges, water_levels, file_path)
-        plt.show()
-    except Exception as e:
-        print(f"初始化失败: {str(e)}")
+    app = MainApp()
+    plt.show()
