@@ -8,8 +8,6 @@ from matplotlib.widgets import Button, TextBox
 from geomdl import fitting
 import pandas as pd
 from tkinter import filedialog
-
-import mpl_toolkits
 import pyperclip
 import scipy as sp
 from matplotlib.ticker import MultipleLocator, AutoMinorLocator
