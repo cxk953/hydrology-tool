@@ -25,65 +25,126 @@ plt.rcParams['axes.unicode_minus'] = False
 
 
 def load_hydrological_data():
+    """确保对话框始终有有效父窗口"""
+    root = AppContext.get_root()
     try:
-        root = tk.Tk()
-        root.withdraw()
         file_path = filedialog.askopenfilename(
             title="选择水文数据文件",
-            filetypes=[("Excel文件", "*.xlsx"), ("CSV文件", "*.csv"), ("所有文件", "*.*")]
+            filetypes=[("Excel文件", "*.xlsx"), ("CSV文件", "*.csv")],
+            parent=root  # 关键：绑定到主窗口
         )
-        # 严格判断空路径情况
-        if not file_path:  # 用户点击取消时返回空字符串
-            messagebox.showinfo("操作取消", "未选择有效文件")
-            root.destroy()
-            return (None,) * 5  # 直接返回空值
+
+        if not file_path:
+            return None  # 用户取消
+
+        # 文件存在性检查
         if not os.path.exists(file_path):
-            messagebox.showerror("错误", "文件路径不存在")
-            root.destroy()
+            messagebox.showerror("错误", "文件路径不存在", parent=root)
             return (None,) * 5
-        # 读取数据
+
+        # 读取数据（强化异常处理）
         try:
-            df = pd.read_excel(file_path, header=0)
+            df = pd.read_excel(file_path, header=0, engine='openpyxl')  # 明确指定引擎
         except Exception as e:
-            if 'root' in locals():
-                root.destroy()
-            print(f"数据加载失败: {str(e)}")
-            return (None,) * 5  # 返回5个None值
-        # 检查必要列是否存在
-        required_columns = ['年份', '测次', '水位', '流量']
-        if not all(col in df.columns for col in required_columns):
-            raise ValueError("文件必须包含'年份', '测次', '水位', '流量'四列")
-        # 数据清洗（保留年份和测次）
+            messagebox.showerror("读取错误", f"文件读取失败: {str(e)}", parent=root)
+            return (None,) * 5
+
+        # 列检查（动态提示缺失列名）
+        required_columns = {'年份', '测次', '水位', '流量'}
+        missing_cols = required_columns - set(df.columns)
+        if missing_cols:
+            messagebox.showerror(
+                "格式错误",
+                f"缺少必要列: {', '.join(missing_cols)}",
+                parent=root
+            )
+            return (None,) * 5
+
+        # 数据清洗流程
         try:
-            df_clean = df.dropna(subset=['水位', '流量'])
-            df_clean['流量'] = pd.to_numeric(df_clean['流量'], errors='coerce')
-            df_clean['水位'] = pd.to_numeric(df_clean['水位'], errors='coerce')
-            # 新增数据范围校验
-            if (df_clean['流量'].abs() > 1e6).any() or (df_clean['水位'].abs() > 1e4).any():
-                raise ValueError("数据值域异常，请检查单位是否为m³/s和米")
-            df_clean = df_clean.dropna(subset=['流量', '水位'])
-            if df_clean.empty:
-                raise ValueError("清洗后无有效数据，请检查文件内容")
-        except KeyError as e:
-            print(f"关键列缺失: {str(e)}")
-            return None, None, None, None, None
-        # 按水位排序
-        df_sorted = df_clean.sort_values(by='水位')
-        # 提取各列数据并确保类型正确
-        years = df_sorted['年份'].astype(int).values
-        tests = df_sorted['测次'].astype(int).values
-        discharges = df_sorted['流量'].astype(float).values
-        water_levels = df_sorted['水位'].astype(float).values
-        # 检查数据长度一致性
-        if len(years) != len(tests) or len(years) != len(discharges) or len(years) != len(water_levels):
-            raise ValueError("数据列长度不一致")
-        return years, tests, discharges, water_levels, file_path
-        root.destroy()  # 最后销毁临时窗口
-        return years, tests, discharges, water_levels, file_path
+            # 空值处理（保留原始索引）
+            df_clean = df.dropna(subset=['水位', '流量']).copy()
+
+            # 数值转换（分步处理）
+            df_clean['流量'] = pd.to_numeric(
+                df_clean['流量'],
+                errors='coerce',
+                downcast='float'
+            )
+            df_clean['水位'] = pd.to_numeric(
+                df_clean['水位'],
+                errors='coerce',
+                downcast='float'
+            )
+
+            # 检查转换结果
+            invalid_q = df_clean['流量'].isna()
+            invalid_wl = df_clean['水位'].isna()
+            if invalid_q.any() or invalid_wl.any():
+                error_lines = []
+                if invalid_q.any():
+                    error_lines.append(f"流量列存在{invalid_q.sum()}个无效值")
+                if invalid_wl.any():
+                    error_lines.append(f"水位列存在{invalid_wl.sum()}个无效值")
+                messagebox.showerror(
+                    "数据错误",
+                    "数值转换失败:\n" + "\n".join(error_lines),
+                    parent=root
+                )
+                return (None,) * 5
+
+            # 数据范围校验（动态阈值）
+            Q_THRESHOLD = 1e6  # 100万立方米/秒
+            WL_THRESHOLD = 1e4  # 1万米
+            abnormal_q = df_clean['流量'].abs() > Q_THRESHOLD
+            abnormal_wl = df_clean['水位'].abs() > WL_THRESHOLD
+            if abnormal_q.any() or abnormal_wl.any():
+                error_lines = []
+                if abnormal_q.any():
+                    error_lines.append(f"{abnormal_q.sum()}个流量值超过{Q_THRESHOLD:,}m³/s")
+                if abnormal_wl.any():
+                    error_lines.append(f"{abnormal_wl.sum()}个水位值超过{WL_THRESHOLD:,}米")
+                messagebox.showerror(
+                    "数据异常",
+                    "数值超出合理范围:\n" + "\n".join(error_lines),
+                    parent=root
+                )
+                return (None,) * 5
+
+            # 数据排序（带索引保留）
+            df_sorted = df_clean.sort_values('水位').reset_index(drop=True)
+
+            # 数据提取（类型强制转换）
+            years = df_sorted['年份'].astype('int32').values
+            tests = df_sorted['测次'].astype('int32').values
+            discharges = df_sorted['流量'].astype('float64').values
+            water_levels = df_sorted['水位'].astype('float64').values
+
+            # 长度一致性验证
+            if len({len(years), len(tests), len(discharges), len(water_levels)}) != 1:
+                messagebox.showerror(
+                    "数据错误",
+                    f"数据列长度不一致:\n"
+                    f"年份: {len(years)}\n"
+                    f"测次: {len(tests)}\n"
+                    f"流量: {len(discharges)}\n"
+                    f"水位: {len(water_levels)}",
+                    parent=root
+                )
+                return (None,) * 5
+
+            return years, tests, discharges, water_levels, file_path
+
+        except Exception as e:
+            messagebox.showerror(
+                "处理错误",
+                f"数据处理失败: {str(e)}\n"
+                f"错误类型: {type(e).__name__}",
+                parent=root
+            )
+            return (None,) * 5
     except Exception as e:
-        if 'root' in locals():
-            root.destroy()
-        print(f"数据加载失败: {str(e)}")
+        messagebox.showerror("错误", str(e), parent=root)
         return (None,) * 5
 
 class CurveInstance:
@@ -176,7 +237,22 @@ class CurveInstance:
             self.history = self.history[:self.history_index + 1]
         self.history.append(np.array(self.curve.ctrlpts).copy())
         self.history_index = len(self.history) - 1
+class AppContext:
+    """统一管理Tkinter上下文"""
+    _root = None
 
+    @classmethod
+    def get_root(cls):
+        if not cls._root or not cls._root.winfo_exists():
+            cls._root = tk.Tk()
+            cls._root.withdraw()
+        return cls._root
+
+    @classmethod
+    def cleanup(cls):
+        if cls._root and cls._root.winfo_exists():
+            cls._root.destroy()
+            cls._root = None
 class CurveEditor:
     def __init__(self, initial_curve_instance):
         # 新增对比模式状态
@@ -191,7 +267,6 @@ class CurveEditor:
         self.file_path = self.current_curve_instance.file_path
         self.degree = self.current_curve_instance.degree  # 直接从实例获取
         self.control_points_size = self.current_curve_instance.control_points_size  # 直接从实例获取
-
         self.years = self.current_curve_instance.years
         self.tests = self.current_curve_instance.tests
         self.discharges = self.current_curve_instance.discharges
@@ -213,16 +288,9 @@ class CurveEditor:
         self.fig.canvas.mpl_connect('button_press_event', self.on_click)
         self.fig.canvas.mpl_connect('motion_notify_event', self.on_drag)
         self.fig.canvas.mpl_connect('button_release_event', self.on_release)
-        # ==== 参数类型强制转换 ====
-        # self.degree = int(degree)  # 确保为整数
-        # self.control_points_size = int(control_points_size)  # 确保为整数
         # ==== 历史记录属性初始化 ====
         self.history = []  # 存储历史控制点
         self.history_index = -1  # 当前历史索引
-
-        # ==== 曲线初始化（必须放在绘图前）====
-        # 曲线初始化（使用已定义的属性）
-        # data_points = [[q, wl] for q, wl in zip(self.discharges, self.water_levels)]  # 明确生成二维列表
         # ==== 曲线初始化 ====
         try:
             # 使用当前曲线实例的数据初始化
@@ -257,16 +325,11 @@ class CurveEditor:
         # 设置网格样式
         self.ax.grid(which='major', linestyle='-', linewidth=1.5, color='#888888')
         self.ax.grid(which='minor', linestyle=':', linewidth=2.0, color='#DDDDDD')
-
-        # 添加控制按钮
-        # self.add_buttons()
         # 添加对比按钮
         self.add_compare_button()
-
-
     def add_compare_button(self):
         """添加对比模式切换按钮"""
-        self.compare_btn_ax = self.fig.add_axes([0.85, 0.08, 0.12, 0.05])
+        self.compare_btn_ax = self.fig.add_axes([0.90, 0.08, 0.10, 0.05])
         self.compare_btn = Button(
             self.compare_btn_ax,
             '进入对比模式',
@@ -322,6 +385,7 @@ class CurveEditor:
         self.operation_mode = 'view'
         self.buttons['toggle_mode'].label.set_text('视图模式')
         self.ax.set_title("曲线对比模式", color='purple')
+        self._update_title()  # 进入对比模式时更新标题
 
     def _exit_compare_mode(self):
         """退出对比模式"""
@@ -335,6 +399,7 @@ class CurveEditor:
         self.ax.set_title(self._generate_title(), color='blue')
         self.ax.legend().remove()
         self.fig.canvas.draw_idle()
+        self._update_title()  # 退出对比模式时更新标题
     def get_current_curve(self):
         return self.curves[self.current_index]
     def setup_axes(self):
@@ -347,14 +412,14 @@ class CurveEditor:
     def create_widgets(self):
         # 添加曲线按钮
         self.add_curve_btn = Button(
-            plt.axes([0.85, 0.02, 0.12, 0.05]),
+            plt.axes([0.90, 0.02, 0.10, 0.05]),
             '添加曲线',
             color='lightgreen'
         )
         self.add_curve_btn.on_clicked(self.add_new_curve)
 
         # 创建单选框代替下拉菜单
-        self.radio_ax = self.fig.add_axes([0.7, 0.02, 0.14, 0.15])
+        self.radio_ax = self.fig.add_axes([0.00, 0.85, 0.10, 0.15])
         self.radio = RadioButtons(self.radio_ax, ['曲线 1'])
         self.radio.on_clicked(lambda label: self.switch_curve(int(label.split()[-1]) - 1))
         # self.combo.on_submitted(self.switch_curve)
@@ -363,16 +428,16 @@ class CurveEditor:
         self.buttons = {}
         # (标签, x位置, y位置, 宽度, 高度, 回调函数)
         buttons_config = [
-            ('toggle_mode', 0.00, 0.90, 0.08, 0.05, self.toggle_mode, '视图模式'),
-            ('data_points', 0.00, 0.84, 0.08, 0.05, self.toggle_data, '隐藏测点'),
-            ('ctrl_points', 0.00, 0.78, 0.08, 0.05, self.toggle_ctrl, '显示控点'),
-            ('undo_btn', 0.00, 0.72, 0.08, 0.05, self.undo, '撤销'),
-            ('redo_btn', 0.00, 0.66, 0.08, 0.05, self.redo, '重做'),
-            ('test_result', 0.00, 0.60, 0.08, 0.05, self.show_test_results, '查看检验'),
-            ('three_test', 0.00, 0.54, 0.08, 0.05, self.export_three_tests, '检验导出'),
-            ('export_wl', 0.00, 0.48, 0.08, 0.05, self.export_relationship, 'H~Q导出'),
-            ('export_data', 0.00, 0.42, 0.08, 0.05, self.export_data, 'Q~H导出'),
-            ('reset_btn', 0.00, 0.36, 0.08, 0.05, self.reset_curve, '重置')
+            ('toggle_mode', 0.90, 0.90, 0.08, 0.05, self.toggle_mode, '视图模式'),
+            ('data_points', 0.90, 0.84, 0.08, 0.05, self.toggle_data, '隐藏测点'),
+            ('ctrl_points', 0.90, 0.78, 0.08, 0.05, self.toggle_ctrl, '显示控点'),
+            ('undo_btn', 0.90, 0.72, 0.08, 0.05, self.undo, '撤销'),
+            ('redo_btn', 0.90, 0.66, 0.08, 0.05, self.redo, '重做'),
+            ('test_result', 0.90, 0.60, 0.08, 0.05, self.show_test_results, '查看检验'),
+            ('three_test', 0.90, 0.54, 0.08, 0.05, self.export_three_tests, '检验导出'),
+            ('export_wl', 0.90, 0.48, 0.08, 0.05, self.export_relationship, 'H~Q导出'),
+            ('export_data', 0.90, 0.42, 0.08, 0.05, self.export_data, 'Q~H导出'),
+            ('reset_btn', 0.90, 0.36, 0.08, 0.05, self.reset_curve, '重置')
         ]
         # 初始化按钮
         self.buttons = {}
@@ -381,25 +446,19 @@ class CurveEditor:
             btn = Button(ax, label)
             btn.on_clicked(func)
             self.buttons[name] = btn
-
-
     def add_new_curve(self, event):
-        if len(self.curves) >= 5:
-            self.show_message("最多支持5条曲线")
+        if len(self.curves) >= 10:
+            self.show_message("最多支持10条曲线")
             return
-
         # 加载新数据
         result = load_hydrological_data()  # 获取完整结果
         if result[0] is None:  # 检查第一个参数是否为None
             return
-
         years, tests, discharges, water_levels, path = result  # 解包结果
-
         # 创建新曲线实例
         new_curve = CurveInstance(years, tests, discharges, water_levels, path)
         new_curve.create_plots(self.ax)
         self.curves.append(new_curve)
-
         # 更新单选框标签
         new_labels = [curve.filename for curve in self.curves]
         self.radio_ax.clear()
@@ -413,6 +472,20 @@ class CurveEditor:
             if curve.filename == filename:
                 self.switch_curve(idx)
                 break
+
+    def _update_title(self):
+        """动态更新图表标题"""
+        if self.is_comparing:
+            title = "曲线对比模式"
+            color = 'purple'
+            fontsize = 18
+        else:
+            current = self.current_curve_instance
+            title = f"{current.filename} 水位流量关系曲线"
+            color = 'blue'
+            fontsize = 22
+        self.ax.set_title(title, color=color, fontsize=fontsize, fontweight='bold')
+        self.fig.canvas.draw_idle()
     def switch_curve(self, index):
         """切换曲线时强制刷新数据"""
         if self.is_comparing:
@@ -420,7 +493,7 @@ class CurveEditor:
         if 0 <= index < len(self.curves):
             self.current_index = index
             self.current_curve_instance = self.curves[self.current_index]
-
+            self._update_title()  # 更新标题
             # 强制重新计算曲线评估点
             self.current_curve_instance.curve.evaluate()  # 新增
             self.update_display()
@@ -433,7 +506,6 @@ class CurveEditor:
                 curve.data_plot.set_visible(False)
                 curve.ctrl_plot.set_visible(False)
                 curve.curve_plot.set_visible(True)  # 强制显示曲线
-
             # 更新图例
             handles, labels = [], []
             for curve in self.curves:
@@ -452,7 +524,6 @@ class CurveEditor:
             current.curve_plot.set_visible(True)
             current.ctrl_plot.set_visible(current.ctrl_visible)
             self.ax.legend().remove()  # 清除对比图例
-
         self.fig.canvas.draw_idle()
     def _generate_title(self):
         """生成基础标题"""
@@ -483,7 +554,6 @@ class CurveEditor:
         """点击事件处理（仅当前曲线）"""
         if self.operation_mode != 'edit' or event.inaxes != self.ax or event.button != 1:
             return
-
         try:
             # 使用当前曲线的控制点
             ctrlpts = np.array(self.current_curve_instance.curve.ctrlpts)
@@ -506,7 +576,6 @@ class CurveEditor:
         if self.operation_mode == 'edit' and self.selected_point is not None:
             if event.xdata is None or event.ydata is None:
                 return
-
             try:
                 # 使用当前曲线实例的控制点
                 new_ctrlpts = [list(pt) for pt in self.current_curve_instance.curve.ctrlpts]  # 修改点
@@ -524,7 +593,6 @@ class CurveEditor:
             self.operation_mode = 'edit' if self.operation_mode == 'view' else 'view'
             new_color = 'red' if self.operation_mode == 'edit' else 'blue'
             mode_text = '编辑模式' if self.operation_mode == 'edit' else '视图模式'
-
             # 使用正确的键名'toggle_mode'
             self.buttons['toggle_mode'].label.set_text(mode_text)  # 键名改为'toggle_mode'
             self.ax.set_title(self._generate_title(), color=new_color)
@@ -560,32 +628,6 @@ class CurveEditor:
             self.fig.canvas.draw_idle()
         except Exception as e:
             print(f"查询失败: {str(e)}")
-
-    # (标签, x位置, y位置, 宽度, 高度, 回调函数)
-    # def add_buttons(self):
-    #     button_config = [
-    #         # 格式：(键名, x位置, y位置, 宽度, 高度, 回调函数, 显示文本)
-    #         ('mode_toggle', 0.00, 0.90, 0.12, 0.05, self.toggle_mode, '视图模式'),
-    #         ('test_result', 0.00, 0.70, 0.08, 0.05, self.show_test_results, '查看检验'),
-    #         ('three_test', 0.00, 0.64, 0.08, 0.05, self.export_three_tests, '检验导出'),
-    #         ('data_points', 0.00, 0.58, 0.08, 0.05, self.toggle_data_points, '隐藏测点'),
-    #         ('ctrl_points', 0.00, 0.52, 0.08, 0.05, self.toggle_control_points, '隐藏控点'),
-    #         ('redo_btn', 0.00, 0.46, 0.08, 0.05, self.redo, '重做'),
-    #         ('undo_btn', 0.00, 0.40, 0.08, 0.05, self.undo, '撤销'),
-    #         ('adjust_ctrl', 0.00, 0.34, 0.08, 0.05, self.adjust_control_points, '调整点数'),
-    #         ('export_wl', 0.00, 0.28, 0.08, 0.05, self.export_relationship, 'H~Q导出'),
-    #         ('export_data', 0.00, 0.22, 0.08, 0.05, self.export_data, 'Q~H导出'),
-    #         ('reset_btn', 0.00, 0.16, 0.08, 0.05, self.reset_curve, 'Reset'),
-    #         # ('generate_formula', 0.00, 0.30, 0.08, 0.05, self.generate_formula, '生成公式')
-    #     ]
-    #
-    #     # 初始化按钮字典
-    #     self.buttons = {}
-    #     for (key, x, y, w, h, func, label) in button_config:
-    #         ax = self.fig.add_axes([x, y, w, h])
-    #         btn = Button(ax, label)
-    #         btn.on_clicked(func)
-    #         self.buttons[key] = btn  # 使用统一键名
 
     # 以下是所有方法实现（保持正确缩进）
     def toggle_data_points(self, event):
@@ -746,14 +788,12 @@ class CurveEditor:
                 '水位（米）': new_wl,
                 '流量（m³/s）': new_q
             })
-
             # 弹出保存对话框
             file_path = filedialog.asksaveasfilename(
                 defaultextension=".xlsx",
                 filetypes=[("Excel文件", "*.xlsx")],
                 title="保存水位流量关系数据"
             )
-
             if file_path:
                 df.to_excel(file_path, index=False)
                 print(f"成功导出{len(df)}条数据至：{file_path}")
@@ -1130,68 +1170,104 @@ class CurveEditor:
         return sorted(results, key=lambda x: x[0]) if results else []
 
 
-
 def start_interface():
-    """创建开始界面"""
-    fig = plt.figure("水位流量关系曲线拟合小程序", figsize=(10, 6))
-    ax = fig.add_subplot(111)
-    ax.axis('off')  # 隐藏坐标轴
+    """完全重构的开始界面"""
+    # 创建独立窗口
+    root = tk.Tk()
+    root.title("水文数据分析系统")
+    root.geometry("800x600")
 
-    # 添加标题（正中靠上）
-    fig.text(
-        0.5, 0.85, "水位流量综合曲线拟合小程序",
-        ha='center', va='center',
-        fontsize=24, fontweight='bold', color='navy'
+    # 添加标题
+    title_label = tk.Label(
+        root,
+        text="水位流量综合曲线拟合小程序",
+        font=("微软雅黑", 24, "bold"),
+        fg="navy"
     )
-
-    # 添加单位信息（左下）
-    fig.text(
-        0.05, 0.05, "编制单位：海南省水文水资源勘测局东部大队",
-        ha='left', va='bottom',
-        fontsize=12, color='gray'
+    title_label.pack(pady=50)
+       # 添加导入按钮
+    import_btn = tk.Button(
+        root,
+        text="导入综合水位流量数据",
+        command=lambda: on_import_clicked(root),  # 关键：传递root引用
+        font=("微软雅黑", 14),
+        bg="lightgreen",
+        activebackground="limegreen"
     )
-
-    # 添加导入按钮（居中）
-    ax_button = fig.add_axes([0.4, 0.4, 0.2, 0.15])  # [left, bottom, width, height]
-    btn_import = Button(
-        ax_button, '导入综合水位流量数据',
-        color='lightgreen', hovercolor='limegreen'
+    import_btn.pack(pady=20)
+    units_label = tk.Label(
+        root,
+        text="使用单位：东部水文水资源勘测大队",
+        font=("微软雅黑", 24, "bold"),
+        fg="navy"
     )
-    btn_import.label.set_fontsize(14)
-    btn_import.label.set_fontweight('bold')
-    pass
+    units_label.pack(pady=160)
 
-    # 设置按钮点击回调
-    def on_import_clicked(event):
-        plt.close(fig)  # 关闭开始界面
-        load_and_show_main_app()
+    root.mainloop()
 
-    btn_import.on_clicked(on_import_clicked)
+def on_import_clicked(parent_window):
+    """按钮点击事件处理"""
+    parent_window.destroy()  # 关键：先销毁开始界面
+    load_and_show_main_app()  # 再加载主程序
 
-    plt.show()
+def show_error_dialog(e):
+    """统一错误提示"""
+    root = tk.Tk()
+    root.withdraw()
+    messagebox.showerror(
+        "操作错误",
+        f"无法继续执行:\n{str(e)}\n请检查数据文件格式",
+        parent=root
+    )
+    root.destroy()
+
+def show_final_warning():
+    """最终警告"""
+    root = tk.Tk()
+    root.withdraw()
+    messagebox.showwarning(
+        "操作终止",
+        "已连续失败3次，建议:\n1. 检查文件格式\n2. 联系技术支持"
+    )
+    root.destroy()
 
 
 def load_and_show_main_app():
+    """修正后的主程序逻辑，避免递归调用"""
+    result = load_hydrological_data()
+
+    # Case 1: 用户主动取消
+    if result is None:
+        AppContext.cleanup()
+        return  # 直接退出，不再执行任何操作
+
+    # Case 2: 数据错误
+    if any(v is None for v in result[:4]):
+        root = AppContext.get_root()
+        messagebox.showerror("错误", "数据不完整", parent=root)
+        AppContext.cleanup()
+        return  # 清理资源后退出
+
+    # Case 3: 正常加载数据
     try:
-        result = load_hydrological_data()
-        if not result or any(item is None for item in result[:4]):
-            root = tk.Tk()
-            root.withdraw()
-            messagebox.showerror("错误", "未选择有效文件或数据不完整")
-            root.destroy()
-            return
         years, tests, discharges, water_levels, file_path = result
         initial_curve = CurveInstance(years, tests, discharges, water_levels, file_path)
         editor = CurveEditor(initial_curve)
         plt.show()
     except Exception as e:
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showerror("初始化错误", f"程序初始化失败: {str(e)}")
-        root.destroy()
+        root = AppContext.get_root()
+        messagebox.showerror("错误", f"初始化失败: {str(e)}", parent=root)
+    finally:
+        AppContext.cleanup()
+        plt.close('all')  # 强制关闭所有Matplotlib窗口
 
 # ... 主程序 ...
 
 if __name__ == '__main__':
     start_interface()
+
+    # 确保完全退出
+    AppContext.cleanup()
+    plt.close('all')
+    sys.exit(0)  # 强制终止进程
     load_and_show_main_app()
